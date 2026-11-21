@@ -17,7 +17,7 @@ import technicianImage from "../assets/fundi-technician.png";
 const API_BASE = "";
 const HISTORY_KEY = "fundi-ai-history-v1";
 const MAX_HISTORY = 10;
-const BOOKINGS_KEY = "fundi-ai-bookings-v1";
+const BOOKINGS_KEY = "fundi-ai-user-bookings-v3";
 
 const copy = {
   en: {
@@ -165,8 +165,27 @@ function readHistory() {
 
 function readBookings() {
   try {
-    const parsed = JSON.parse(localStorage.getItem(BOOKINGS_KEY) || "[]");
-    return Array.isArray(parsed) ? parsed : [];
+    // Clean up any legacy test keys
+    localStorage.removeItem("fundi-ai-bookings-v1");
+    localStorage.removeItem("fundi-ai-user-bookings-v2");
+
+    const raw = localStorage.getItem(BOOKINGS_KEY);
+    if (!raw) return [];
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return [];
+
+    // Filter out any mock/test entries so user bookings never start pre-populated
+    const valid = parsed.filter(b =>
+      b &&
+      b.customerName !== "Amina Mohamed" &&
+      b.customerName !== "Juma Mwangi" &&
+      b.customerName !== "Test User" &&
+      b.customerName !== "Antony Test"
+    );
+    if (valid.length !== parsed.length) {
+      localStorage.setItem(BOOKINGS_KEY, JSON.stringify(valid));
+    }
+    return valid;
   } catch {
     return [];
   }
@@ -290,6 +309,7 @@ export default function App() {
   const [shopsLoading, setShopsLoading] = useState(false);
   const [error, setError] = useState("");
   const [voiceMessage, setVoiceMessage] = useState("");
+  const [isListening, setIsListening] = useState(false);
 
   const [user, setUser] = useState(null);
   const [authLoading, setAuthLoading] = useState(true);
@@ -297,7 +317,10 @@ export default function App() {
   const [signingIn, setSigningIn] = useState(false);
 
   const recognitionRef = useRef(null);
-  const [bookingMode, setBookingMode] = useState("home");
+  const [isDiagnosedBooking, setIsDiagnosedBooking] = useState(false);
+  const [suggestedShops, setSuggestedShops] = useState([]);
+
+  const [bookingMode, setBookingMode] = useState("shop");
   const [bookingDevice, setBookingDevice] = useState("phone");
   const [bookingIssue, setBookingIssue] = useState("");
   const [bookingDate, setBookingDate] = useState("");
@@ -305,8 +328,12 @@ export default function App() {
   const [bookingName, setBookingName] = useState("");
   const [bookingPhone, setBookingPhone] = useState("");
   const [bookingPlace, setBookingPlace] = useState("");
+  const [selectedShopId, setSelectedShopId] = useState("");
+  const [bookingHomeAddress, setBookingHomeAddress] = useState("");
   const [bookingNote, setBookingNote] = useState("");
   const [bookingMessage, setBookingMessage] = useState("");
+  const [bookingSubmitting, setBookingSubmitting] = useState(false);
+  const [bookingsLoading, setBookingsLoading] = useState(false);
 
   const t = copy[language];
 
@@ -410,13 +437,17 @@ export default function App() {
       if (!parsed.length) throw new Error("The API returned no diagnosis results.");
 
       setDiagnoses(parsed);
+      const parsedSuggestedShops = normalizeShops(data.suggested_shops || []);
+      setSuggestedShops(parsedSuggestedShops);
+
       setHistory(prev => [
         {
           id: `${Date.now()}`,
           date: new Date().toISOString(),
           device,
           symptom: symptoms.trim(),
-          results: parsed
+          results: parsed,
+          suggested_shops: data.suggested_shops || []
         },
         ...prev
       ].slice(0, MAX_HISTORY));
@@ -440,7 +471,12 @@ export default function App() {
       });
 
       if (!response.ok) throw new Error(`HTTP ${response.status}`);
-      setShops(normalizeShops(await response.json()));
+      const shopList = normalizeShops(await response.json());
+      setShops(shopList);
+      if (shopList.length > 0 && !selectedShopId) {
+        setSelectedShopId(shopList[0].id);
+        setBookingPlace(`${shopList[0].name} (${shopList[0].location})`);
+      }
     } catch (err) {
       console.error("Shop request failed:", err);
       setError(err instanceof TypeError ? t.apiError : err.message || t.error);
@@ -449,83 +485,317 @@ export default function App() {
     }
   }
 
+  async function loadBookings() {
+    // Only refresh user-made bookings. If the user hasn't made any bookings yet, keep it empty!
+    const current = readBookings();
+    if (!current || current.length === 0) {
+      setBookings([]);
+      return;
+    }
+
+    setBookingsLoading(true);
+    try {
+      const updated = await Promise.all(
+        current.map(async b => {
+          const rawId = b.rawId || Number(String(b.id).replace(/\D/g, ""));
+          if (!rawId) return b;
+          try {
+            const res = await fetch(`${API_BASE}/api/bookings/${rawId}`);
+            if (res.ok) {
+              const fresh = await res.json();
+              return {
+                ...b,
+                status: (fresh.status || b.status).charAt(0).toUpperCase() + (fresh.status || b.status).slice(1).toLowerCase(),
+                date: fresh.date || b.date,
+                place: fresh.shop_name ? `${fresh.shop_name} (${fresh.shop_location || ""})` : b.place
+              };
+            }
+          } catch {
+            // Keep existing booking details
+          }
+          return b;
+        })
+      );
+      setBookings(updated);
+    } catch (err) {
+      console.warn("Could not refresh bookings from backend:", err);
+    } finally {
+      setBookingsLoading(false);
+    }
+  }
+
   useEffect(() => {
-    if (page === "shops" && shops.length === 0) loadShops();
+    loadShops();
+    loadBookings();
+  }, []);
+
+  useEffect(() => {
+    if ((page === "shops" || page === "book") && shops.length === 0) loadShops();
+    if (page === "bookings") loadBookings();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [page]);
+
+  function startBookingFromDiagnosis(targetItem) {
+    const chosen = targetItem || diagnoses[0];
+    const faultTitle = chosen?.title || "";
+    const problemText = faultTitle && symptoms
+      ? `${faultTitle}: ${symptoms}`
+      : (faultTitle || symptoms || "Hardware fault");
+
+    setIsDiagnosedBooking(true);
+    setBookingDevice(device || "phone");
+    setBookingIssue(problemText.trim());
+    setBookingMode("shop");
+
+    if (!bookingDate) {
+      const tmrw = new Date();
+      tmrw.setDate(tmrw.getDate() + 1);
+      setBookingDate(tmrw.toISOString().slice(0, 10));
+    }
+    if (!bookingTime) {
+      setBookingTime("10:00");
+    }
+    if (user?.displayName && !bookingName) {
+      setBookingName(user.displayName);
+    }
+
+    if (suggestedShops.length > 0) {
+      setSelectedShopId(suggestedShops[0].id);
+      setBookingPlace(`${suggestedShops[0].name} (${suggestedShops[0].location})`);
+    } else if (shops.length > 0) {
+      setSelectedShopId(shops[0].id);
+      setBookingPlace(`${shops[0].name} (${shops[0].location})`);
+    }
+
+    if (shops.length === 0) {
+      loadShops();
+    }
+
+    setBookingMessage("");
+    setPage("book");
+  }
 
   function startVoiceInput() {
     const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
 
     if (!SpeechRecognition) {
-      setVoiceMessage("Voice input is not supported in this browser.");
+      setVoiceMessage(
+        language === "sw"
+          ? "Kivinjari hiki hakitumii utambuzi wa sauti (tafadhali jaribu Google Chrome au Edge)."
+          : "Voice recognition is not supported in this browser (please try Google Chrome or Edge)."
+      );
       return;
     }
 
-    if (recognitionRef.current) recognitionRef.current.stop();
-
-    const recognition = new SpeechRecognition();
-    recognition.lang = language === "sw" ? "sw-KE" : "en-KE";
-    recognition.interimResults = false;
-    recognition.continuous = false;
-
-    recognition.onstart = () => setVoiceMessage(t.listening);
-
-    recognition.onresult = event => {
-      const transcript = event.results?.[0]?.[0]?.transcript || "";
-      setSymptoms(prev => `${prev}${prev ? " " : ""}${transcript}`.trim());
+    // Toggle off if already listening
+    if (isListening && recognitionRef.current) {
+      recognitionRef.current.stop();
+      setIsListening(false);
       setVoiceMessage("");
-    };
+      return;
+    }
 
-    recognition.onerror = () => setVoiceMessage("Voice input could not be completed.");
-    recognition.onend = () => {
-      recognitionRef.current = null;
-    };
+    try {
+      const recognition = new SpeechRecognition();
+      // Use language with broad universal browser support
+      recognition.lang = language === "sw" ? "sw-KE" : (navigator.language || "en-US");
+      recognition.continuous = false;
+      recognition.interimResults = true;
+      recognition.maxAlternatives = 1;
 
-    recognitionRef.current = recognition;
-    recognition.start();
+      recognition.onstart = () => {
+        setIsListening(true);
+        setVoiceMessage(language === "sw" ? "● Inasikiliza... Ongea sasa" : "● Listening... Speak now");
+      };
+
+      recognition.onresult = event => {
+        let finalStr = "";
+        let interimStr = "";
+        for (let i = event.resultIndex; i < event.results.length; i++) {
+          const res = event.results[i];
+          if (res.isFinal) {
+            finalStr += res[0].transcript;
+          } else {
+            interimStr += res[0].transcript;
+          }
+        }
+
+        if (interimStr) {
+          setVoiceMessage(language === "sw" ? `Kusikiliza: "${interimStr}"` : `Hearing: "${interimStr}"`);
+        }
+
+        if (finalStr) {
+          setSymptoms(prev => `${prev}${prev ? " " : ""}${finalStr}`.trim());
+          setVoiceMessage("");
+        }
+      };
+
+      recognition.onerror = event => {
+        console.warn("Speech recognition error:", event.error);
+        setIsListening(false);
+        recognitionRef.current = null;
+
+        if (event.error === "not-allowed" || event.error === "service-not-allowed") {
+          setVoiceMessage(
+            language === "sw"
+              ? "Maikrofoni imezimwa. Bonyeza alama ya kufuli kwenye anwani ya tovuti ili kuruhusu maikrofoni."
+              : "Microphone permission blocked. Click the lock/tune icon in your address bar to allow microphone access."
+          );
+        } else if (event.error === "no-speech") {
+          setVoiceMessage(
+            language === "sw"
+              ? "Hakuna sauti iliyosikika. Tafadhali ongea karibu na maikrofoni na ujaribu tena."
+              : "No speech detected. Please speak closer to your microphone and try again."
+          );
+        } else if (event.error === "language-not-supported") {
+          setVoiceMessage(
+            language === "sw"
+              ? "Lugha ya eneo haipatikani. Inajaribu kwa lugha ya kawaida..."
+              : "Regional language pack not supported. Retrying with universal English..."
+          );
+          try {
+            const fallback = new SpeechRecognition();
+            fallback.lang = "en-US";
+            fallback.interimResults = true;
+            fallback.onresult = recognition.onresult;
+            fallback.onstart = recognition.onstart;
+            fallback.onend = () => { setIsListening(false); recognitionRef.current = null; };
+            recognitionRef.current = fallback;
+            fallback.start();
+          } catch {
+            setIsListening(false);
+          }
+        } else if (event.error === "audio-capture") {
+          setVoiceMessage(
+            language === "sw"
+              ? "Hakuna maikrofoni iliyopatikana. Hakikisha maikrofoni imeunganishwa."
+              : "No microphone detected on your device. Please verify your microphone is connected."
+          );
+        } else {
+          setVoiceMessage(`Voice error: ${event.error}. Please try again or type directly.`);
+        }
+      };
+
+      recognition.onend = () => {
+        setIsListening(false);
+        recognitionRef.current = null;
+      };
+
+      recognitionRef.current = recognition;
+      recognition.start();
+    } catch (err) {
+      console.error("Speech recognition start failed:", err);
+      setIsListening(false);
+      setVoiceMessage("Could not start voice input. Please ensure microphone permissions are granted.");
+    }
   }
 
-  function createBooking(event) {
+  async function createBooking(event) {
     event.preventDefault();
     setBookingMessage("");
 
-    if (!bookingIssue.trim() || !bookingDate || !bookingTime ||
-        !bookingName.trim() || !bookingPhone.trim() || !bookingPlace.trim()) {
-      setBookingMessage("Please complete all required booking details.");
+    if (!bookingName.trim() || !bookingPhone.trim() || !bookingDate) {
+      setBookingMessage("Please complete all required booking details (name, phone, date).");
       return;
     }
 
-    const booking = {
-      id: `FA-${Date.now().toString().slice(-8)}`,
-      mode: bookingMode,
-      device: bookingDevice,
-      issue: bookingIssue.trim(),
-      date: bookingDate,
-      time: bookingTime,
-      customerName: bookingName.trim(),
-      phone: bookingPhone.trim(),
-      place: bookingPlace.trim(),
-      note: bookingNote.trim(),
-      status: "Pending",
-      createdAt: new Date().toISOString(),
-      customerEmail: user?.email || ""
-    };
+    const targetShopId = Number(selectedShopId) || (shops[0]?.id || 1);
+    const chosenShop = shops.find(s => s.id === targetShopId) || shops[0];
 
-    setBookings(previous => [booking, ...previous]);
-    setBookingIssue("");
-    setBookingDate("");
-    setBookingTime("");
-    setBookingNote("");
-    setBookingMessage(`Booking created successfully. Reference: ${booking.id}`);
-    setPage("bookings");
+    if (bookingMode === "home" && !bookingHomeAddress.trim()) {
+      setBookingMessage("Please provide your home / service address.");
+      return;
+    }
+
+    setBookingSubmitting(true);
+
+    const noteParts = [];
+    if (bookingIssue.trim()) noteParts.push(bookingIssue.trim());
+    if (bookingMode === "home" && bookingHomeAddress.trim()) {
+      noteParts.push(`Service Address: ${bookingHomeAddress.trim()}`);
+    }
+    if (bookingTime) noteParts.push(`Time: ${bookingTime}`);
+    if (bookingNote.trim()) noteParts.push(`Note: ${bookingNote.trim()}`);
+    const combinedNotes = noteParts.join(" | ");
+
+    try {
+      const payload = {
+        user_name: bookingName.trim(),
+        phone: bookingPhone.trim(),
+        shop_id: targetShopId,
+        date: bookingDate,
+        device_category: bookingDevice || "phone",
+        notes: combinedNotes
+      };
+
+      const response = await fetch(`${API_BASE}/api/bookings`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Accept: "application/json"
+        },
+        body: JSON.stringify(payload)
+      });
+
+      if (!response.ok) {
+        const errJson = await response.json().catch(() => ({}));
+        throw new Error(errJson.detail || `Booking failed with HTTP ${response.status}`);
+      }
+
+      const created = await response.json();
+      const newBooking = {
+        id: `FA-${String(created.id).padStart(5, "0")}`,
+        rawId: created.id,
+        mode: bookingMode,
+        device: created.device_category || bookingDevice,
+        issue: bookingIssue.trim(),
+        date: created.date,
+        time: bookingTime || "Scheduled day",
+        customerName: created.user_name,
+        phone: created.phone,
+        place: created.shop_name ? `${created.shop_name} (${created.shop_location || ""})` : (chosenShop ? `${chosenShop.name} (${chosenShop.location})` : "Repair shop"),
+        note: bookingNote.trim(),
+        status: (created.status || "Pending").charAt(0).toUpperCase() + (created.status || "Pending").slice(1).toLowerCase(),
+        createdAt: created.created_at || new Date().toISOString()
+      };
+
+      setBookings(prev => [newBooking, ...prev]);
+      setBookingNote("");
+      setBookingHomeAddress("");
+      setBookingMessage(`Booking submitted successfully! Reference: ${newBooking.id} at ${created.shop_name || (chosenShop?.name || "chosen shop")}`);
+      setPage("bookings");
+    } catch (err) {
+      console.error("Booking error:", err);
+      setBookingMessage(err.message || "Could not submit booking. Please check your connection.");
+    } finally {
+      setBookingSubmitting(false);
+    }
   }
 
-  function cancelBooking(bookingId) {
-    setBookings(previous => previous.map(booking =>
-        booking.id === bookingId && booking.status === "Pending"
-            ? { ...booking, status: "Cancelled" }
-            : booking
+  async function cancelBooking(target) {
+    const booking = typeof target === "object" ? target : bookings.find(b => b.id === target);
+    if (!booking) return;
+
+    const backendId = booking.rawId || Number(String(booking.id).replace(/\D/g, ""));
+    if (backendId) {
+      try {
+        await fetch(`${API_BASE}/api/bookings/${backendId}/status`, {
+          method: "PATCH",
+          headers: {
+            "Content-Type": "application/json",
+            Accept: "application/json"
+          },
+          body: JSON.stringify({ status: "cancelled" })
+        });
+      } catch (err) {
+        console.warn("Could not cancel on backend:", err);
+      }
+    }
+
+    setBookings(previous => previous.map(b =>
+      b.id === booking.id && b.status.toLowerCase() === "pending"
+        ? { ...b, status: "Cancelled" }
+        : b
     ));
   }
 
@@ -533,6 +803,7 @@ export default function App() {
     setDevice(item.device);
     setSymptoms(item.symptom);
     setDiagnoses(item.results || []);
+    setSuggestedShops(normalizeShops(item.suggested_shops || []));
     setPage("result");
   }
 
@@ -594,6 +865,16 @@ export default function App() {
                 <strong>{t.cost}:</strong> {formatKsh(item.cost, item.currency)}
               </p>
           )}
+
+          <div style={{ marginTop: "16px", display: "flex", justifyContent: "flex-end" }}>
+            <button
+                type="button"
+                className="secondary-button"
+                onClick={() => startBookingFromDiagnosis(item)}
+            >
+              Book appointment for this issue →
+            </button>
+          </div>
         </article>
     ));
   }
@@ -734,8 +1015,12 @@ export default function App() {
                   />
 
                   <div className="form-meta">
-                    <button className="secondary-button" type="button" onClick={startVoiceInput}>
-                      {t.voice}
+                    <button
+                      className={`secondary-button ${isListening ? "active-voice-button" : ""}`}
+                      type="button"
+                      onClick={startVoiceInput}
+                    >
+                      {isListening ? (language === "sw" ? "Simamisha kusikiliza" : "Stop listening") : t.voice}
                     </button>
                     <span className="muted">{symptoms.length}/2000</span>
                   </div>
@@ -764,6 +1049,28 @@ export default function App() {
                 </div>
 
                 {renderDiagnosisCards(diagnoses)}
+
+                <div className="appointment-cta-card no-print">
+                  <div className="appointment-cta-info">
+                    <span className="appointment-cta-badge">NEED PROFESSIONAL REPAIR?</span>
+                    <h3>Checked the suggested steps and need a technician?</h3>
+                    <p>
+                      Book a repair appointment with a verified local technician. We'll automatically transfer your diagnosed issue details into the booking request.
+                    </p>
+                    {suggestedShops.length > 0 && (
+                      <p className="appointment-cta-shops-preview">
+                        ★ Recommended nearby shop: <strong>{suggestedShops[0].name}</strong> ({suggestedShops[0].location})
+                      </p>
+                    )}
+                  </div>
+                  <button
+                    type="button"
+                    className="primary-button appointment-cta-btn"
+                    onClick={() => startBookingFromDiagnosis(diagnoses[0])}
+                  >
+                    Book an appointment with a technician →
+                  </button>
+                </div>
 
                 <button className="secondary-button no-print" onClick={() => setPage("diagnosis")}>
                   {t.back}
@@ -826,7 +1133,7 @@ export default function App() {
                   <div>
                     <span className="eyebrow">REPAIR APPOINTMENT</span>
                     <h1>Book a repair</h1>
-                    <p className="muted">Choose a home visit or book an appointment at a repair shop.</p>
+                    <p className="muted">Choose a repair shop visit or a home visit by a technician.</p>
                   </div>
                 </div>
 
@@ -838,24 +1145,24 @@ export default function App() {
                     <div className="booking-mode-grid">
                       <button
                           type="button"
-                          className={`booking-mode-card ${bookingMode === "home" ? "selected" : ""}`}
-                          onClick={() => { setBookingMode("home"); setBookingPlace(""); }}
-                          aria-pressed={bookingMode === "home"}
-                      >
-                        <span className="booking-mode-icon">⌂</span>
-                        <strong>Home service</strong>
-                        <small>A technician visits your location</small>
-                      </button>
-
-                      <button
-                          type="button"
                           className={`booking-mode-card ${bookingMode === "shop" ? "selected" : ""}`}
-                          onClick={() => { setBookingMode("shop"); setBookingPlace(""); }}
+                          onClick={() => { setBookingMode("shop"); }}
                           aria-pressed={bookingMode === "shop"}
                       >
                         <span className="booking-mode-icon">⌖</span>
                         <strong>Visit a repair shop</strong>
                         <small>You take your device to the shop</small>
+                      </button>
+
+                      <button
+                          type="button"
+                          className={`booking-mode-card ${bookingMode === "home" ? "selected" : ""}`}
+                          onClick={() => { setBookingMode("home"); }}
+                          aria-pressed={bookingMode === "home"}
+                      >
+                        <span className="booking-mode-icon">⌂</span>
+                        <strong>Home service</strong>
+                        <small>A technician visits your location</small>
                       </button>
                     </div>
                   </fieldset>
@@ -870,7 +1177,17 @@ export default function App() {
                       </select>
                     </label>
 
-                    <label className="field-label">Describe the problem
+                    <label className="field-label">
+                      {isDiagnosedBooking ? (
+                        <span style={{ display: "inline-flex", alignItems: "center", gap: "8px", color: "var(--red-dark)", fontWeight: "800", letterSpacing: "0.5px" }}>
+                          THE DIAGNOSED ISSUE
+                          <span style={{ fontSize: "11px", fontWeight: "700", background: "var(--red-soft)", color: "var(--red)", padding: "2px 8px", borderRadius: "4px" }}>
+                            Auto-filled from diagnosis
+                          </span>
+                        </span>
+                      ) : (
+                        "Describe the problem"
+                      )}
                       <textarea
                           rows="3"
                           value={bookingIssue}
@@ -904,16 +1221,39 @@ export default function App() {
                     </label>
 
                     <label className="field-label booking-place-field">
-                      {bookingMode === "home" ? "Home / service address" : "Repair shop name or address"}
-                      <input
-                          type="text"
-                          value={bookingPlace}
-                          onChange={e => setBookingPlace(e.target.value)}
-                          placeholder={bookingMode === "home" ? "Estate, building, street and area" : "Enter your preferred repair shop"}
-                          autoComplete={bookingMode === "home" ? "street-address" : "off"}
+                      {bookingMode === "shop" ? "Select repair shop" : "Servicing repair shop"}
+                      <select
+                          value={selectedShopId}
+                          onChange={e => {
+                            const id = Number(e.target.value);
+                            setSelectedShopId(id);
+                            const chosen = shops.find(s => s.id === id);
+                            if (chosen) setBookingPlace(`${chosen.name} (${chosen.location})`);
+                          }}
                           required
-                      />
+                      >
+                        {shops.length === 0 && <option value="">Loading available repair shops...</option>}
+                        {shops.map(shop => (
+                          <option key={shop.id} value={shop.id}>
+                            {shop.name} — {shop.location} {shop.rating ? `(★ ${shop.rating})` : ""}
+                          </option>
+                        ))}
+                      </select>
                     </label>
+
+                    {bookingMode === "home" && (
+                      <label className="field-label booking-place-field">
+                        Home / service address
+                        <input
+                            type="text"
+                            value={bookingHomeAddress}
+                            onChange={e => setBookingHomeAddress(e.target.value)}
+                            placeholder="Estate, building, house/apartment number and area"
+                            autoComplete="street-address"
+                            required
+                        />
+                      </label>
+                    )}
 
                     <label className="field-label booking-place-field">Additional instructions (optional)
                       <textarea
@@ -926,10 +1266,12 @@ export default function App() {
                     </label>
                   </div>
 
-                  <p className="booking-local-note">
-                    Your request will be saved in this browser for now. A technician has not yet been notified because the booking backend is not connected.
+                  <p className="booking-connected-note">
+                    ✓ Your appointment request will be saved directly to the database and sent to the selected repair shop.
                   </p>
-                  <button className="primary-button full-width" type="submit">Submit booking request</button>
+                  <button className="primary-button full-width" type="submit" disabled={bookingSubmitting}>
+                    {bookingSubmitting ? "Submitting booking request..." : "Submit booking request"}
+                  </button>
                 </form>
               </section>
           )}
@@ -944,9 +1286,26 @@ export default function App() {
                     <h1>My bookings</h1>
                     <p className="muted">Review your appointment requests and their current status.</p>
                   </div>
-                  <button className="primary-button" onClick={() => { setBookingMessage(""); setPage("book"); }}>
-                    New booking
-                  </button>
+                  <div style={{ display: "flex", gap: "10px", alignItems: "center" }}>
+                    {bookings.length > 0 && (
+                      <button
+                        type="button"
+                        className="text-button"
+                        onClick={() => {
+                          setBookings([]);
+                          try { localStorage.removeItem(BOOKINGS_KEY); } catch {}
+                        }}
+                      >
+                        Clear
+                      </button>
+                    )}
+                    <button className="secondary-button" onClick={loadBookings} disabled={bookingsLoading}>
+                      {bookingsLoading ? "Loading..." : "Refresh"}
+                    </button>
+                    <button className="primary-button" onClick={() => { setBookingMessage(""); setIsDiagnosedBooking(false); setBookingIssue(""); setPage("book"); }}>
+                      New booking
+                    </button>
+                  </div>
                 </div>
 
                 {bookings.length === 0 ? (
@@ -954,7 +1313,7 @@ export default function App() {
                       <span className="booking-empty-icon">▣</span>
                       <h3>No bookings yet</h3>
                       <p className="muted">Your repair appointments will appear here after you submit a request.</p>
-                      <button className="primary-button" onClick={() => setPage("book")}>Book a technician</button>
+                      <button className="primary-button" onClick={() => { setIsDiagnosedBooking(false); setBookingIssue(""); setPage("book"); }}>Book a technician</button>
                     </div>
                 ) : (
                     <div className="booking-list">
@@ -963,11 +1322,11 @@ export default function App() {
                             <div className="booking-card-top">
                               <div>
                                 <span className="booking-reference">REF: {booking.id}</span>
-                                <h3>{booking.device.charAt(0).toUpperCase() + booking.device.slice(1)} repair</h3>
+                                <h3>{((booking.device || "device").charAt(0).toUpperCase() + (booking.device || "device").slice(1))} repair</h3>
                               </div>
-                              <span className={`booking-status status-${booking.status.toLowerCase().replace(/\s+/g, "-")}`}>
-                        {booking.status}
-                      </span>
+                              <span className={`booking-status status-${(booking.status || "pending").toLowerCase().replace(/\s+/g, "-")}`}>
+                                {booking.status}
+                              </span>
                             </div>
 
                             <p className="booking-issue">{booking.issue}</p>
@@ -975,17 +1334,17 @@ export default function App() {
                             <div className="booking-details-grid">
                               <span><strong>Service:</strong> {booking.mode === "home" ? "Home visit" : "Repair shop visit"}</span>
                               <span><strong>Date:</strong> {booking.date}</span>
-                              <span><strong>Time:</strong> {booking.time}</span>
+                              {booking.time && <span><strong>Time:</strong> {booking.time}</span>}
                               <span><strong>Contact:</strong> {booking.phone}</span>
                               <span className="booking-address">
-                        <strong>{booking.mode === "home" ? "Address:" : "Shop:"}</strong> {booking.place}
-                      </span>
+                                <strong>{booking.mode === "home" ? "Address / Shop:" : "Shop:"}</strong> {booking.place}
+                              </span>
                             </div>
 
                             {booking.note && <p className="booking-note"><strong>Note:</strong> {booking.note}</p>}
 
                             {booking.status === "Pending" && (
-                                <button className="text-button booking-cancel" onClick={() => cancelBooking(booking.id)}>
+                                <button className="text-button booking-cancel" onClick={() => cancelBooking(booking)}>
                                   Cancel request
                                 </button>
                             )}

@@ -157,7 +157,7 @@ export default function VoiceAssistant({
 
         const recognition = new SpeechRecognition();
 
-        recognition.lang = isSwahili ? "sw-KE" : "en-KE";
+        recognition.lang = isSwahili ? "sw-KE" : (navigator.language || "en-US");
         recognition.continuous = false;
         recognition.interimResults = false;
         recognition.maxAlternatives = 1;
@@ -173,7 +173,14 @@ export default function VoiceAssistant({
         };
 
         recognition.onerror = (event) => {
-            setMessage(`Voice error: ${event.error}. Please try again.`);
+            console.warn("VoiceAssistant error:", event.error);
+            if (event.error === "not-allowed") {
+                setMessage(isSwahili ? "Ruhusa ya maikrofoni imezimwa." : "Microphone permission blocked in browser.");
+            } else if (event.error === "no-speech") {
+                setMessage(isSwahili ? "Hakuna sauti iliyosikika." : "No speech detected. Please speak closer.");
+            } else {
+                setMessage(`Voice error: ${event.error}. Please try again.`);
+            }
             setListening(false);
         };
 
