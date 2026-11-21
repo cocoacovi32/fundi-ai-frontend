@@ -184,24 +184,50 @@ function normalizeDiagnosis(payload) {
       : payload?.faults ||
       payload?.top_faults ||
       payload?.results ||
-      (payload && (payload.fault || payload.name || payload.title) ? [payload] : []);
+      payload?.diagnosis ||
+      (payload && (payload.fault || payload.name || payload.title)
+          ? [payload]
+          : []);
 
   return list.slice(0, 5).map((item, index) => {
-    const rawConfidence = Number(item.confidence ?? item.confidence_score);
+    const rawConfidence = Number(
+        item.confidence ?? item.confidence_score ?? item.match_score
+    );
+
     const confidence = Number.isFinite(rawConfidence)
         ? Math.round(Math.max(0, Math.min(100, rawConfidence <= 1 ? rawConfidence * 100 : rawConfidence)))
         : null;
 
     const rawSteps = item.steps || item.fix_steps || item.recommendations || [];
 
+    const rawRisk = asText(
+        item.risk || item.severity || item.risk_level,
+        "unknown"
+    ).toLowerCase();
+    const riskMap = { red: "high", yellow: "medium", green: "low" };
+    const risk = riskMap[rawRisk] || rawRisk;
+
+    let cost = asText(item.cost || item.cost_estimate);
+    if (!cost && item.estimated_cost) {
+      if (typeof item.estimated_cost === "object" && item.estimated_cost !== null) {
+        const min = item.estimated_cost.min;
+        const max = item.estimated_cost.max;
+        cost = min != null && max != null ? `${min} - ${max}` : "";
+      } else {
+        cost = asText(item.estimated_cost);
+      }
+    }
+
     return {
       id: `${Date.now()}-${index}`,
       title: asText(item.title || item.fault || item.name || item.issue, `Possible issue ${index + 1}`),
       description: asText(item.description || item.explanation),
       confidence,
-      risk: asText(item.risk_level || item.risk || item.severity, "unknown").toLowerCase(),
-      steps: Array.isArray(rawSteps) ? rawSteps.map(x => asText(x)).filter(Boolean) : [],
-      cost: asText(item.estimated_cost || item.cost_estimate || item.cost),
+      risk,
+      steps: Array.isArray(rawSteps)
+          ? rawSteps.map(x => asText(x)).filter(Boolean)
+          : [],
+      cost,
       currency: asText(item.currency, "KES")
     };
   });
@@ -236,7 +262,10 @@ function formatKsh(value, currency = "KES") {
 }
 
 function RiskPill({ risk, t }) {
-  const key = ["high", "medium", "low"].includes(risk) ? risk : "unknown";
+  const normRisk = { red: "high", yellow: "medium", green: "low" }[risk] || risk;
+  const key = ["high", "medium", "low"].includes(normRisk)
+      ? normRisk
+      : "unknown";
 
   return (
       <span className={`risk-pill risk-${key}`}>
