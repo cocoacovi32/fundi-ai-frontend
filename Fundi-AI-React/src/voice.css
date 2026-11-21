@@ -1,0 +1,65 @@
+
+.voice-assistant {
+    position: fixed;
+    right: 22px;
+    bottom: 22px;
+    z-index: 1000;
+    display: flex;
+    flex-direction: column;
+    align-items: flex-end;
+    gap: 10px;
+    max-width: min(330px, calc(100vw - 32px));
+}
+
+.voice-assistant-message {
+    background: #1a1a1a;
+    color: white;
+    padding: 11px 15px;
+    border-radius: 14px;
+    font-size: 13px;
+    line-height: 1.5;
+    box-shadow: 0 5px 20px rgba(0, 0, 0, 0.18);
+}
+
+.voice-assistant-button {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    border: 0;
+    border-radius: 30px;
+    padding: 13px 20px;
+    color: white;
+    background: #cf0a2c;
+    font-size: 15px;
+    font-weight: 700;
+    cursor: pointer;
+    box-shadow: 0 5px 18px rgba(207, 10, 44, 0.3);
+    transition: transform 0.2s ease, background 0.2s ease;
+}
+
+.voice-assistant-button:hover {
+    transform: translateY(-2px);
+    background: #a80723;
+}
+
+.voice-mic-icon {
+    font-size: 20px;
+}
+
+.voice-assistant-button.is-listening {
+    background: #176b45;
+    animation: fundi-pulse 1.2s infinite;
+}
+
+@keyframes fundi-pulse {
+    0% { box-shadow: 0 0 0 0 rgba(23, 107, 69, 0.5); }
+    70% { box-shadow: 0 0 0 13px rgba(23, 107, 69, 0); }
+    100% { box-shadow: 0 0 0 0 rgba(23, 107, 69, 0); }
+}
+
+@media (max-width: 600px) {
+    .voice-assistant {
+        right: 12px;
+        bottom: 12px;
+    }
+}

@@ -1,4 +1,4 @@
-
+import VoiceAssistant from "./VoiceAssistant.jsx";
 import React, { useEffect, useMemo, useRef, useState } from "react";
 
 import { auth, googleProvider } from "./firebase.js";
@@ -9,9 +9,15 @@ import {
   signOut
 } from "firebase/auth";
 
+import laptopImage from "../assets/laptop-selected.png";
+import phoneImage from "../assets/phone-selected.png";
+import routerImage from "../assets/router-selected.png";
+import technicianImage from "../assets/fundi-technician.png";
+
 const API_BASE = "";
 const HISTORY_KEY = "fundi-ai-history-v1";
 const MAX_HISTORY = 10;
+const BOOKINGS_KEY = "fundi-ai-bookings-v1";
 
 const copy = {
   en: {
@@ -144,19 +150,23 @@ const copy = {
     premiumFeature2: "Mwongozo wa kina wa marekebisho",
     premiumFeature3: "Kipaumbele cha msaada (kitakapopatikana)",
     premiumFeature4: "Historia ya marekebisho iliyopangwa",
-    checklistProgress: "Hatua za marekebisho zilizokamilika"
+    checklistProgress: "Hatua za marekebisho zilizokamilishwa"
   }
 };
 
 function readHistory() {
   try {
-    const parsed = JSON.parse(
-        localStorage.getItem(HISTORY_KEY) || "[]"
-    );
+    const parsed = JSON.parse(localStorage.getItem(HISTORY_KEY) || "[]");
+    return Array.isArray(parsed) ? parsed.slice(0, MAX_HISTORY) : [];
+  } catch {
+    return [];
+  }
+}
 
-    return Array.isArray(parsed)
-        ? parsed.slice(0, MAX_HISTORY)
-        : [];
+function readBookings() {
+  try {
+    const parsed = JSON.parse(localStorage.getItem(BOOKINGS_KEY) || "[]");
+    return Array.isArray(parsed) ? parsed : [];
   } catch {
     return [];
   }
@@ -164,11 +174,7 @@ function readHistory() {
 
 function asText(value, fallback = "") {
   if (value === null || value === undefined) return fallback;
-
-  if (typeof value === "string" || typeof value === "number") {
-    return String(value);
-  }
-
+  if (typeof value === "string" || typeof value === "number") return String(value);
   return fallback;
 }
 
@@ -178,79 +184,38 @@ function normalizeDiagnosis(payload) {
       : payload?.faults ||
       payload?.top_faults ||
       payload?.results ||
-      (payload && (payload.fault || payload.name || payload.title)
-          ? [payload]
-          : []);
+      (payload && (payload.fault || payload.name || payload.title) ? [payload] : []);
 
   return list.slice(0, 5).map((item, index) => {
-    const rawConfidence = Number(
-        item.confidence ?? item.confidence_score
-    );
-
+    const rawConfidence = Number(item.confidence ?? item.confidence_score);
     const confidence = Number.isFinite(rawConfidence)
-        ? Math.round(
-            Math.max(
-                0,
-                Math.min(
-                    100,
-                    rawConfidence <= 1
-                        ? rawConfidence * 100
-                        : rawConfidence
-                )
-            )
-        )
+        ? Math.round(Math.max(0, Math.min(100, rawConfidence <= 1 ? rawConfidence * 100 : rawConfidence)))
         : null;
 
-    const rawSteps =
-        item.steps ||
-        item.fix_steps ||
-        item.recommendations ||
-        [];
+    const rawSteps = item.steps || item.fix_steps || item.recommendations || [];
 
     return {
       id: `${Date.now()}-${index}`,
-      title: asText(
-          item.title || item.fault || item.name || item.issue,
-          `Possible issue ${index + 1}`
-      ),
-      description: asText(
-          item.description || item.explanation
-      ),
+      title: asText(item.title || item.fault || item.name || item.issue, `Possible issue ${index + 1}`),
+      description: asText(item.description || item.explanation),
       confidence,
-      risk: asText(
-          item.risk_level || item.risk || item.severity,
-          "unknown"
-      ).toLowerCase(),
-      steps: Array.isArray(rawSteps)
-          ? rawSteps.map(x => asText(x)).filter(Boolean)
-          : [],
-      cost: asText(
-          item.estimated_cost ||
-          item.cost_estimate ||
-          item.cost
-      ),
+      risk: asText(item.risk_level || item.risk || item.severity, "unknown").toLowerCase(),
+      steps: Array.isArray(rawSteps) ? rawSteps.map(x => asText(x)).filter(Boolean) : [],
+      cost: asText(item.estimated_cost || item.cost_estimate || item.cost),
       currency: asText(item.currency, "KES")
     };
   });
 }
 
 function normalizeShops(payload) {
-  const rows = Array.isArray(payload)
-      ? payload
-      : payload?.shops || payload?.results || [];
-
+  const rows = Array.isArray(payload) ? payload : payload?.shops || payload?.results || [];
   return Array.isArray(rows) ? rows : [];
 }
 
 function safeExternalUrl(value) {
   try {
     const url = new URL(value);
-
-    return ["http:", "https:", "tel:", "mailto:"].includes(
-        url.protocol
-    )
-        ? url.href
-        : "";
+    return ["http:", "https:", "tel:", "mailto:"].includes(url.protocol) ? url.href : "";
   } catch {
     return "";
   }
@@ -259,18 +224,19 @@ function safeExternalUrl(value) {
 function formatKsh(value, currency = "KES") {
   if (value === null || value === undefined || value === "") return "";
   const raw = String(value).trim();
+
   if (/KSh|KES/i.test(raw)) return raw.replace(/KES/ig, "KSh");
+
   const numeric = Number(raw.replace(/[,\s]/g, ""));
   if (Number.isFinite(numeric)) {
     return `KSh ${new Intl.NumberFormat("en-KE", { maximumFractionDigits: 0 }).format(numeric)}`;
   }
+
   return `${raw} ${currency === "KES" ? "KSh" : currency}`;
 }
 
 function RiskPill({ risk, t }) {
-  const key = ["high", "medium", "low"].includes(risk)
-      ? risk
-      : "unknown";
+  const key = ["high", "medium", "low"].includes(risk) ? risk : "unknown";
 
   return (
       <span className={`risk-pill risk-${key}`}>
@@ -287,6 +253,7 @@ export default function App() {
   const [diagnoses, setDiagnoses] = useState([]);
   const [shops, setShops] = useState([]);
   const [history, setHistory] = useState(readHistory);
+  const [bookings, setBookings] = useState(readBookings);
   const [checkedSteps, setCheckedSteps] = useState({});
   const [selectedPlan, setSelectedPlan] = useState("free");
 
@@ -295,17 +262,25 @@ export default function App() {
   const [error, setError] = useState("");
   const [voiceMessage, setVoiceMessage] = useState("");
 
-  // Firebase authentication state
   const [user, setUser] = useState(null);
   const [authLoading, setAuthLoading] = useState(true);
   const [authError, setAuthError] = useState("");
   const [signingIn, setSigningIn] = useState(false);
 
   const recognitionRef = useRef(null);
+  const [bookingMode, setBookingMode] = useState("home");
+  const [bookingDevice, setBookingDevice] = useState("phone");
+  const [bookingIssue, setBookingIssue] = useState("");
+  const [bookingDate, setBookingDate] = useState("");
+  const [bookingTime, setBookingTime] = useState("");
+  const [bookingName, setBookingName] = useState("");
+  const [bookingPhone, setBookingPhone] = useState("");
+  const [bookingPlace, setBookingPlace] = useState("");
+  const [bookingNote, setBookingNote] = useState("");
+  const [bookingMessage, setBookingMessage] = useState("");
 
   const t = copy[language];
 
-  // Listen for Firebase login and logout changes.
   useEffect(() => {
     const unsubscribe = onAuthStateChanged(
         auth,
@@ -314,10 +289,7 @@ export default function App() {
           setAuthLoading(false);
         },
         authListenerError => {
-          console.error(
-              "Authentication listener error:",
-              authListenerError
-          );
+          console.error("Authentication listener error:", authListenerError);
           setAuthError("Could not check your login status.");
           setAuthLoading(false);
         }
@@ -326,29 +298,27 @@ export default function App() {
     return () => unsubscribe();
   }, []);
 
-  // Save diagnosis history locally.
   useEffect(() => {
     try {
-      localStorage.setItem(
-          HISTORY_KEY,
-          JSON.stringify(history.slice(0, MAX_HISTORY))
-      );
+      localStorage.setItem(BOOKINGS_KEY, JSON.stringify(bookings));
+    } catch {
+      // Browser storage may be unavailable.
+    }
+  }, [bookings]);
+
+  useEffect(() => {
+    try {
+      localStorage.setItem(HISTORY_KEY, JSON.stringify(history.slice(0, MAX_HISTORY)));
     } catch {
       // Browser storage may be unavailable.
     }
   }, [history]);
 
   const selectedDeviceLabel = useMemo(() => {
-    const map = {
-      phone: t.phone,
-      laptop: t.laptop,
-      router: t.router
-    };
-
+    const map = { phone: t.phone, laptop: t.laptop, router: t.router };
     return map[device] || device;
   }, [device, t]);
 
-  // Google sign-in.
   async function handleGoogleSignIn() {
     setAuthError("");
     setSigningIn(true);
@@ -361,20 +331,15 @@ export default function App() {
       if (err.code === "auth/popup-closed-by-user") {
         setAuthError("Google sign-in was cancelled.");
       } else if (err.code === "auth/popup-blocked") {
-        setAuthError(
-            "Your browser blocked the sign-in popup. Allow popups and try again."
-        );
+        setAuthError("Your browser blocked the sign-in popup. Allow popups and try again.");
       } else {
-        setAuthError(
-            err.message || "Google sign-in failed. Please try again."
-        );
+        setAuthError(err.message || "Google sign-in failed. Please try again.");
       }
     } finally {
       setSigningIn(false);
     }
   }
 
-  // Google sign-out.
   async function handleSignOut() {
     setAuthError("");
 
@@ -382,16 +347,12 @@ export default function App() {
       await signOut(auth);
     } catch (err) {
       console.error("Sign-out error:", err);
-      setAuthError(
-          err.message || "Could not sign out. Please try again."
-      );
+      setAuthError(err.message || "Could not sign out. Please try again.");
     }
   }
 
-  // Device diagnosis.
   async function diagnose(event) {
     event?.preventDefault();
-
     setError("");
 
     if (!device || !symptoms.trim()) {
@@ -403,37 +364,23 @@ export default function App() {
     setLoading(true);
 
     try {
-      const response = await fetch(
-          `${API_BASE}/api/diagnose`,
-          {
-            method: "POST",
-            headers: {
-              "Content-Type": "application/json",
-              Accept: "application/json"
-            },
-            body: JSON.stringify({
-              device,
-              symptom: symptoms.trim(),
-              language
-            })
-          }
-      );
+      const response = await fetch(`${API_BASE}/api/diagnose`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Accept: "application/json"
+        },
+        body: JSON.stringify({ device, symptom: symptoms.trim(), language })
+      });
 
-      if (!response.ok) {
-        throw new Error(`HTTP ${response.status}`);
-      }
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
 
       const data = await response.json();
       const parsed = normalizeDiagnosis(data);
 
-      if (!parsed.length) {
-        throw new Error(
-            "The API returned no diagnosis results."
-        );
-      }
+      if (!parsed.length) throw new Error("The API returned no diagnosis results.");
 
       setDiagnoses(parsed);
-
       setHistory(prev => [
         {
           id: `${Date.now()}`,
@@ -448,112 +395,109 @@ export default function App() {
       setPage("result");
     } catch (err) {
       console.error("Diagnosis request failed:", err);
-
-      setError(
-          err instanceof TypeError
-              ? t.apiError
-              : err.message || t.error
-      );
+      setError(err instanceof TypeError ? t.apiError : err.message || t.error);
     } finally {
       setLoading(false);
     }
   }
 
-  // Load repair shops from backend.
   async function loadShops() {
     setShopsLoading(true);
     setError("");
 
     try {
-      const response = await fetch(
-          `${API_BASE}/api/shops`,
-          {
-            headers: {
-              Accept: "application/json"
-            }
-          }
-      );
+      const response = await fetch(`${API_BASE}/api/shops`, {
+        headers: { Accept: "application/json" }
+      });
 
-      if (!response.ok) {
-        throw new Error(`HTTP ${response.status}`);
-      }
-
-      setShops(
-          normalizeShops(await response.json())
-      );
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      setShops(normalizeShops(await response.json()));
     } catch (err) {
       console.error("Shop request failed:", err);
-
-      setError(
-          err instanceof TypeError
-              ? t.apiError
-              : err.message || t.error
-      );
+      setError(err instanceof TypeError ? t.apiError : err.message || t.error);
     } finally {
       setShopsLoading(false);
     }
   }
 
   useEffect(() => {
-    if (page === "shops" && shops.length === 0) {
-      loadShops();
-    }
-
+    if (page === "shops" && shops.length === 0) loadShops();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [page]);
 
-  // Browser voice input.
   function startVoiceInput() {
-    const SpeechRecognition =
-        window.SpeechRecognition ||
-        window.webkitSpeechRecognition;
+    const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
 
     if (!SpeechRecognition) {
-      setVoiceMessage(
-          "Voice input is not supported in this browser."
-      );
+      setVoiceMessage("Voice input is not supported in this browser.");
       return;
     }
 
-    if (recognitionRef.current) {
-      recognitionRef.current.stop();
-    }
+    if (recognitionRef.current) recognitionRef.current.stop();
 
     const recognition = new SpeechRecognition();
-
-    recognition.lang =
-        language === "sw" ? "sw-KE" : "en-KE";
-
+    recognition.lang = language === "sw" ? "sw-KE" : "en-KE";
     recognition.interimResults = false;
     recognition.continuous = false;
 
-    recognition.onstart = () => {
-      setVoiceMessage(t.listening);
-    };
+    recognition.onstart = () => setVoiceMessage(t.listening);
 
     recognition.onresult = event => {
-      const transcript =
-          event.results?.[0]?.[0]?.transcript || "";
-
-      setSymptoms(prev =>
-          `${prev}${prev ? " " : ""}${transcript}`.trim()
-      );
-
+      const transcript = event.results?.[0]?.[0]?.transcript || "";
+      setSymptoms(prev => `${prev}${prev ? " " : ""}${transcript}`.trim());
       setVoiceMessage("");
     };
 
-    recognition.onerror = () => {
-      setVoiceMessage(
-          "Voice input could not be completed."
-      );
-    };
-
+    recognition.onerror = () => setVoiceMessage("Voice input could not be completed.");
     recognition.onend = () => {
       recognitionRef.current = null;
     };
 
     recognitionRef.current = recognition;
     recognition.start();
+  }
+
+  function createBooking(event) {
+    event.preventDefault();
+    setBookingMessage("");
+
+    if (!bookingIssue.trim() || !bookingDate || !bookingTime ||
+        !bookingName.trim() || !bookingPhone.trim() || !bookingPlace.trim()) {
+      setBookingMessage("Please complete all required booking details.");
+      return;
+    }
+
+    const booking = {
+      id: `FA-${Date.now().toString().slice(-8)}`,
+      mode: bookingMode,
+      device: bookingDevice,
+      issue: bookingIssue.trim(),
+      date: bookingDate,
+      time: bookingTime,
+      customerName: bookingName.trim(),
+      phone: bookingPhone.trim(),
+      place: bookingPlace.trim(),
+      note: bookingNote.trim(),
+      status: "Pending",
+      createdAt: new Date().toISOString(),
+      customerEmail: user?.email || ""
+    };
+
+    setBookings(previous => [booking, ...previous]);
+    setBookingIssue("");
+    setBookingDate("");
+    setBookingTime("");
+    setBookingNote("");
+    setBookingMessage(`Booking created successfully. Reference: ${booking.id}`);
+    setPage("bookings");
+  }
+
+  function cancelBooking(bookingId) {
+    setBookings(previous => previous.map(booking =>
+        booking.id === bookingId && booking.status === "Pending"
+            ? { ...booking, status: "Cancelled" }
+            : booking
+    ));
   }
 
   function openHistoryItem(item) {
@@ -564,40 +508,25 @@ export default function App() {
   }
 
   function renderDiagnosisCards(items) {
-    if (!items?.length) {
-      return <p className="muted">{t.noResult}</p>;
-    }
+    if (!items?.length) return <p className="muted">{t.noResult}</p>;
 
     return items.map((item, index) => (
-        <article
-            className="result-card"
-            key={item.id || `${item.title}-${index}`}
-        >
+        <article className="result-card" key={item.id || `${item.title}-${index}`}>
           <div className="result-heading">
             <h3>{item.title}</h3>
             <RiskPill risk={item.risk} t={t} />
           </div>
 
-          {item.description && (
-              <p>{item.description}</p>
-          )}
+          {item.description && <p>{item.description}</p>}
 
           <div className="metric-row">
             <span>{t.confidence}</span>
-            <strong>
-              {item.confidence === null
-                  ? t.unknown
-                  : `${item.confidence}%`}
-            </strong>
+            <strong>{item.confidence === null ? t.unknown : `${item.confidence}%`}</strong>
           </div>
 
           {item.confidence !== null && (
               <div className="meter">
-            <span
-                style={{
-                  width: `${item.confidence}%`
-                }}
-            />
+                <span style={{ width: `${item.confidence}%` }} />
               </div>
           )}
 
@@ -606,19 +535,25 @@ export default function App() {
                 <h4>{t.fix}</h4>
                 <div className="repair-checklist">
                   <p className="checklist-progress">
-                    {t.checklistProgress}: {item.steps.filter((_, i) => checkedSteps[`${item.id || item.title}-${i}`]).length}/{item.steps.length}
+                    {t.checklistProgress}:{" "}
+                    {item.steps.filter((_, i) => checkedSteps[`${item.id || item.title}-${i}`]).length}/{item.steps.length}
                   </p>
+
                   {item.steps.map((step, i) => {
                     const stepId = `${item.id || item.title}-${i}`;
+
                     return (
-                      <label className="repair-step" key={stepId}>
-                        <input
-                          type="checkbox"
-                          checked={Boolean(checkedSteps[stepId])}
-                          onChange={(event) => setCheckedSteps(previous => ({ ...previous, [stepId]: event.target.checked }))}
-                        />
-                        <span className={checkedSteps[stepId] ? "step-done" : ""}>{step}</span>
-                      </label>
+                        <label className="repair-step" key={stepId}>
+                          <input
+                              type="checkbox"
+                              checked={Boolean(checkedSteps[stepId])}
+                              onChange={event => setCheckedSteps(previous => ({
+                                ...previous,
+                                [stepId]: event.target.checked
+                              }))}
+                          />
+                          <span className={checkedSteps[stepId] ? "step-done" : ""}>{step}</span>
+                        </label>
                     );
                   })}
                 </div>
@@ -627,8 +562,7 @@ export default function App() {
 
           {item.cost && (
               <p className="cost">
-                <strong>{t.cost}:</strong>{" "}
-                {formatKsh(item.cost, item.currency)}
+                <strong>{t.cost}:</strong> {formatKsh(item.cost, item.currency)}
               </p>
           )}
         </article>
@@ -638,13 +572,8 @@ export default function App() {
   return (
       <div className="app-shell">
         <header className="topbar">
-          <button
-              className="brand"
-              onClick={() => setPage("home")}
-              aria-label="Fundi AI home"
-          >
+          <button className="brand" onClick={() => setPage("home")} aria-label="Fundi AI home">
             <span className="brand-mark">F</span>
-
             <span>
             <strong>Fundi AI</strong>
             <small>{t.tagline}</small>
@@ -654,20 +583,14 @@ export default function App() {
           <div className="header-actions">
             <button
                 className="language-toggle"
-                onClick={() =>
-                    setLanguage(
-                        language === "en" ? "sw" : "en"
-                    )
-                }
+                onClick={() => setLanguage(language === "en" ? "sw" : "en")}
                 aria-label="Change language"
             >
               {language === "en" ? "Kiswahili" : "English"}
             </button>
 
             {authLoading ? (
-                <span className="auth-loading">
-              Loading...
-            </span>
+                <span className="auth-loading">Loading...</span>
             ) : user ? (
                 <div className="user-profile">
                   {user.photoURL && (
@@ -678,24 +601,11 @@ export default function App() {
                           referrerPolicy="no-referrer"
                       />
                   )}
-
-                  <span className="user-name">
-                {user.displayName || user.email}
-              </span>
-
-                  <button
-                      className="secondary-button"
-                      onClick={handleSignOut}
-                  >
-                    {t.signOut}
-                  </button>
+                  <span className="user-name">{user.displayName || user.email}</span>
+                  <button className="secondary-button" onClick={handleSignOut}>{t.signOut}</button>
                 </div>
             ) : (
-                <button
-                    className="google-button"
-                    onClick={handleGoogleSignIn}
-                    disabled={signingIn}
-                >
+                <button className="google-button" onClick={handleGoogleSignIn} disabled={signingIn}>
                   {signingIn ? t.signingIn : t.google}
                 </button>
             )}
@@ -708,16 +618,14 @@ export default function App() {
             ["diagnosis", t.diagnosis],
             ["result", t.result],
             ["shops", t.shops],
+            ["book", "Book a repair"],
+            ["bookings", "My bookings"],
             ["history", t.history],
             ["premium", t.premium]
           ].map(([id, label]) => (
               <button
                   key={id}
-                  className={
-                    page === id
-                        ? "nav-tab active"
-                        : "nav-tab"
-                  }
+                  className={page === id ? "nav-tab active" : "nav-tab"}
                   onClick={() => setPage(id)}
               >
                 {label}
@@ -726,33 +634,17 @@ export default function App() {
         </nav>
 
         <main className={`page-content page-${page}`} key={page}>
-          {error && (
-              <div className="alert" role="alert">
-                {error}
-              </div>
-          )}
-
-          {authError && (
-              <div className="alert" role="alert">
-                {authError}
-              </div>
-          )}
+          {error && <div className="alert" role="alert">{error}</div>}
+          {authError && <div className="alert" role="alert">{authError}</div>}
 
           {page === "home" && (
               <section className="hero panel">
-            <span className="eyebrow">
-              FUNDI AI
-            </span>
-
+                <span className="eyebrow">FUNDI AI</span>
                 <h1>{t.welcome}</h1>
-
                 <p>{t.intro}</p>
 
                 <div className="hero-actions">
-                  <button
-                      className="primary-button"
-                      onClick={() => setPage("diagnosis")}
-                  >
+                  <button className="primary-button" onClick={() => setPage("diagnosis")}>
                     {t.diagnose}
                   </button>
                   <span className="hero-note">Your friendly device-care assistant</span>
@@ -760,12 +652,15 @@ export default function App() {
 
                 <div className="hero-technician">
                   <img
-                    src="/assets/fundi-technician.png"
-                    alt="Fundi AI repair technician standing with a screwdriver"
+                      src={technicianImage}
+                      alt="Fundi AI repair technician standing with a screwdriver"
                   />
                   <div className="technician-caption">
                     <span className="caption-dot" />
-                    <span><strong>Your repair partner</strong><small>Smart help, one step at a time</small></span>
+                    <span>
+                  <strong>Your repair partner</strong>
+                  <small>Smart help, one step at a time</small>
+                </span>
                   </div>
                 </div>
               </section>
@@ -781,75 +676,46 @@ export default function App() {
 
                     <div className="device-grid">
                       {[
-                        ["phone", "▯", t.phone],
-                        ["laptop", "▱", t.laptop],
-                        ["router", "⌁", t.router]
-                      ].map(([id, icon, label]) => (
+                        ["phone", phoneImage, t.phone],
+                        ["laptop", laptopImage, t.laptop],
+                        ["router", routerImage, t.router]
+                      ].map(([id, image, label]) => (
                           <button
                               type="button"
                               key={id}
-                              className={`device-option ${
-                                  device === id ? "selected" : ""
-                              }`}
+                              className={`device-option ${device === id ? "selected" : ""}`}
                               onClick={() => setDevice(id)}
                               aria-pressed={device === id}
                           >
-                      <span className="device-icon">
-                        {icon}
-                      </span>
-
+                            <img src={image} alt={label} className="device-option-image" />
                             <strong>{label}</strong>
                           </button>
                       ))}
                     </div>
                   </fieldset>
 
-                  <label
-                      className="field-label"
-                      htmlFor="symptoms"
-                  >
-                    {t.symptoms}
-                  </label>
-
+                  <label className="field-label" htmlFor="symptoms">{t.symptoms}</label>
                   <textarea
                       id="symptoms"
                       rows="5"
                       value={symptoms}
-                      onChange={e =>
-                          setSymptoms(e.target.value)
-                      }
+                      onChange={e => setSymptoms(e.target.value)}
                       placeholder={t.placeholder}
                       maxLength={2000}
                   />
 
                   <div className="form-meta">
-                    <button
-                        className="secondary-button"
-                        type="button"
-                        onClick={startVoiceInput}
-                    >
+                    <button className="secondary-button" type="button" onClick={startVoiceInput}>
                       {t.voice}
                     </button>
-
-                    <span className="muted">
-                  {symptoms.length}/2000
-                </span>
+                    <span className="muted">{symptoms.length}/2000</span>
                   </div>
 
                   {voiceMessage && (
-                      <p
-                          className="voice-status"
-                          aria-live="polite"
-                      >
-                        {voiceMessage}
-                      </p>
+                      <p className="voice-status" aria-live="polite">{voiceMessage}</p>
                   )}
 
-                  <button
-                      className="primary-button full-width"
-                      type="submit"
-                      disabled={loading}
-                  >
+                  <button className="primary-button full-width" type="submit" disabled={loading}>
                     {loading ? t.diagnosing : t.diagnose}
                   </button>
                 </form>
@@ -861,26 +727,16 @@ export default function App() {
                 <div className="section-heading">
                   <div>
                     <h1>{t.resultTitle}</h1>
-
-                    <p className="muted">
-                      {selectedDeviceLabel} · {symptoms}
-                    </p>
+                    <p className="muted">{selectedDeviceLabel} · {symptoms}</p>
                   </div>
-
-                  <button
-                      className="secondary-button no-print"
-                      onClick={() => window.print()}
-                  >
+                  <button className="secondary-button no-print" onClick={() => window.print()}>
                     {t.print}
                   </button>
                 </div>
 
                 {renderDiagnosisCards(diagnoses)}
 
-                <button
-                    className="secondary-button no-print"
-                    onClick={() => setPage("diagnosis")}
-                >
+                <button className="secondary-button no-print" onClick={() => setPage("diagnosis")}>
                   {t.back}
                 </button>
               </section>
@@ -891,16 +747,9 @@ export default function App() {
                 <div className="section-heading">
                   <div>
                     <h1>{t.shopsTitle}</h1>
-                    <p className="muted">
-                      {t.shopsIntro}
-                    </p>
+                    <p className="muted">{t.shopsIntro}</p>
                   </div>
-
-                  <button
-                      className="secondary-button"
-                      onClick={loadShops}
-                      disabled={shopsLoading}
-                  >
+                  <button className="secondary-button" onClick={loadShops} disabled={shopsLoading}>
                     {shopsLoading ? "…" : t.refresh}
                   </button>
                 </div>
@@ -910,40 +759,17 @@ export default function App() {
                 ) : (
                     <div className="shop-list">
                       {shops.map((shop, index) => {
-                        const name = asText(
-                            shop.name || shop.shop_name,
-                            `Repair shop ${index + 1}`
-                        );
-
-                        const link = safeExternalUrl(
-                            asText(
-                                shop.booking_url ||
-                                shop.phone_url ||
-                                shop.website
-                            )
-                        );
+                        const name = asText(shop.name || shop.shop_name, `Repair shop ${index + 1}`);
+                        const link = safeExternalUrl(asText(shop.booking_url || shop.phone_url || shop.website));
 
                         return (
-                            <article
-                                className="shop-card"
-                                key={shop.id || `${name}-${index}`}
-                            >
+                            <article className="shop-card" key={shop.id || `${name}-${index}`}>
                               <div>
                                 <h3>{name}</h3>
-
-                                <p>
-                                  {asText(
-                                      shop.address || shop.location
-                                  )}
-                                </p>
-
+                                <p>{asText(shop.address || shop.location)}</p>
                                 <p className="shop-meta">
-                                  {shop.rating != null
-                                      ? `★ ${asText(shop.rating)}`
-                                      : ""}
-                                  {shop.price_range
-                                      ? ` · ${asText(shop.price_range)}`
-                                      : ""}
+                                  {shop.rating != null ? `★ ${asText(shop.rating)}` : ""}
+                                  {shop.price_range ? ` · ${asText(shop.price_range)}` : ""}
                                 </p>
                               </div>
 
@@ -965,16 +791,187 @@ export default function App() {
               </section>
           )}
 
+          {page === "book" && (
+              <section className="panel booking-panel">
+                <div className="section-heading">
+                  <div>
+                    <span className="eyebrow">REPAIR APPOINTMENT</span>
+                    <h1>Book a repair</h1>
+                    <p className="muted">Choose a home visit or book an appointment at a repair shop.</p>
+                  </div>
+                </div>
+
+                {bookingMessage && <div className="alert booking-feedback" role="status">{bookingMessage}</div>}
+
+                <form className="booking-form" onSubmit={createBooking}>
+                  <fieldset>
+                    <legend>Where would you like the repair?</legend>
+                    <div className="booking-mode-grid">
+                      <button
+                          type="button"
+                          className={`booking-mode-card ${bookingMode === "home" ? "selected" : ""}`}
+                          onClick={() => { setBookingMode("home"); setBookingPlace(""); }}
+                          aria-pressed={bookingMode === "home"}
+                      >
+                        <span className="booking-mode-icon">⌂</span>
+                        <strong>Home service</strong>
+                        <small>A technician visits your location</small>
+                      </button>
+
+                      <button
+                          type="button"
+                          className={`booking-mode-card ${bookingMode === "shop" ? "selected" : ""}`}
+                          onClick={() => { setBookingMode("shop"); setBookingPlace(""); }}
+                          aria-pressed={bookingMode === "shop"}
+                      >
+                        <span className="booking-mode-icon">⌖</span>
+                        <strong>Visit a repair shop</strong>
+                        <small>You take your device to the shop</small>
+                      </button>
+                    </div>
+                  </fieldset>
+
+                  <div className="booking-fields">
+                    <label className="field-label">Device
+                      <select value={bookingDevice} onChange={e => setBookingDevice(e.target.value)} required>
+                        <option value="phone">Phone</option>
+                        <option value="laptop">Laptop</option>
+                        <option value="router">Router</option>
+                        <option value="other">Other device</option>
+                      </select>
+                    </label>
+
+                    <label className="field-label">Describe the problem
+                      <textarea
+                          rows="3"
+                          value={bookingIssue}
+                          onChange={e => setBookingIssue(e.target.value)}
+                          placeholder="Tell the technician what needs repair..."
+                          maxLength={1500}
+                          required
+                      />
+                    </label>
+
+                    <label className="field-label">Preferred date
+                      <input
+                          type="date"
+                          value={bookingDate}
+                          min={new Date().toISOString().slice(0, 10)}
+                          onChange={e => setBookingDate(e.target.value)}
+                          required
+                      />
+                    </label>
+
+                    <label className="field-label">Preferred time
+                      <input type="time" value={bookingTime} onChange={e => setBookingTime(e.target.value)} required />
+                    </label>
+
+                    <label className="field-label">Your full name
+                      <input type="text" value={bookingName} onChange={e => setBookingName(e.target.value)} placeholder="Name" autoComplete="name" required />
+                    </label>
+
+                    <label className="field-label">Phone number
+                      <input type="tel" value={bookingPhone} onChange={e => setBookingPhone(e.target.value)} placeholder="+254 7XX XXX XXX" autoComplete="tel" required />
+                    </label>
+
+                    <label className="field-label booking-place-field">
+                      {bookingMode === "home" ? "Home / service address" : "Repair shop name or address"}
+                      <input
+                          type="text"
+                          value={bookingPlace}
+                          onChange={e => setBookingPlace(e.target.value)}
+                          placeholder={bookingMode === "home" ? "Estate, building, street and area" : "Enter your preferred repair shop"}
+                          autoComplete={bookingMode === "home" ? "street-address" : "off"}
+                          required
+                      />
+                    </label>
+
+                    <label className="field-label booking-place-field">Additional instructions (optional)
+                      <textarea
+                          rows="2"
+                          value={bookingNote}
+                          onChange={e => setBookingNote(e.target.value)}
+                          placeholder="Landmark, access instructions or other details..."
+                          maxLength={800}
+                      />
+                    </label>
+                  </div>
+
+                  <p className="booking-local-note">
+                    Your request will be saved in this browser for now. A technician has not yet been notified because the booking backend is not connected.
+                  </p>
+                  <button className="primary-button full-width" type="submit">Submit booking request</button>
+                </form>
+              </section>
+          )}
+
+          {page === "bookings" && (
+              <section className="panel booking-panel">
+                {bookingMessage && <div className="alert booking-feedback" role="status">{bookingMessage}</div>}
+
+                <div className="section-heading">
+                  <div>
+                    <span className="eyebrow">YOUR REPAIR REQUESTS</span>
+                    <h1>My bookings</h1>
+                    <p className="muted">Review your appointment requests and their current status.</p>
+                  </div>
+                  <button className="primary-button" onClick={() => { setBookingMessage(""); setPage("book"); }}>
+                    New booking
+                  </button>
+                </div>
+
+                {bookings.length === 0 ? (
+                    <div className="booking-empty">
+                      <span className="booking-empty-icon">▣</span>
+                      <h3>No bookings yet</h3>
+                      <p className="muted">Your repair appointments will appear here after you submit a request.</p>
+                      <button className="primary-button" onClick={() => setPage("book")}>Book a technician</button>
+                    </div>
+                ) : (
+                    <div className="booking-list">
+                      {bookings.map(booking => (
+                          <article className="booking-card" key={booking.id}>
+                            <div className="booking-card-top">
+                              <div>
+                                <span className="booking-reference">REF: {booking.id}</span>
+                                <h3>{booking.device.charAt(0).toUpperCase() + booking.device.slice(1)} repair</h3>
+                              </div>
+                              <span className={`booking-status status-${booking.status.toLowerCase().replace(/\s+/g, "-")}`}>
+                        {booking.status}
+                      </span>
+                            </div>
+
+                            <p className="booking-issue">{booking.issue}</p>
+
+                            <div className="booking-details-grid">
+                              <span><strong>Service:</strong> {booking.mode === "home" ? "Home visit" : "Repair shop visit"}</span>
+                              <span><strong>Date:</strong> {booking.date}</span>
+                              <span><strong>Time:</strong> {booking.time}</span>
+                              <span><strong>Contact:</strong> {booking.phone}</span>
+                              <span className="booking-address">
+                        <strong>{booking.mode === "home" ? "Address:" : "Shop:"}</strong> {booking.place}
+                      </span>
+                            </div>
+
+                            {booking.note && <p className="booking-note"><strong>Note:</strong> {booking.note}</p>}
+
+                            {booking.status === "Pending" && (
+                                <button className="text-button booking-cancel" onClick={() => cancelBooking(booking.id)}>
+                                  Cancel request
+                                </button>
+                            )}
+                          </article>
+                      ))}
+                    </div>
+                )}
+              </section>
+          )}
+
           {page === "history" && (
               <section className="panel">
                 <div className="section-heading">
                   <h1>{t.historyTitle}</h1>
-
-                  <button
-                      className="text-button"
-                      onClick={() => setHistory([])}
-                      disabled={!history.length}
-                  >
+                  <button className="text-button" onClick={() => setHistory([])} disabled={!history.length}>
                     {t.clear}
                   </button>
                 </div>
@@ -984,21 +981,12 @@ export default function App() {
                 ) : (
                     <div className="history-list">
                       {history.map(item => (
-                          <button
-                              className="history-item"
-                              key={item.id}
-                              onClick={() => openHistoryItem(item)}
-                          >
+                          <button className="history-item" key={item.id} onClick={() => openHistoryItem(item)}>
                     <span>
                       <strong>{item.device}</strong>
                       <small>{item.symptom}</small>
                     </span>
-
-                            <time>
-                              {new Date(
-                                  item.date
-                              ).toLocaleDateString()}
-                            </time>
+                            <time>{new Date(item.date).toLocaleDateString()}</time>
                           </button>
                       ))}
                     </div>
@@ -1007,55 +995,64 @@ export default function App() {
           )}
 
           {page === "premium" && (
-            <section className="premium-page">
-              <div className="premium-intro">
-                <span className="eyebrow">FUNDI AI MEMBERSHIP</span>
-                <h1>Choose the support that works for you</h1>
-                <p>Start free, or explore extra guidance with Fundi AI Premium.</p>
-              </div>
-              <div className="plan-grid">
-                <article className={`plan-card ${selectedPlan === "free" ? "plan-selected" : ""}`}>
-                  <div className="plan-label">{t.freePlan}</div>
-                  <h2>{t.freePrice}</h2>
-                  <p>{t.freeDescription}</p>
-                  <h3>{t.included}</h3>
-                  <ul>
-                    <li>{t.freeFeature1}</li>
-                    <li>{t.freeFeature2}</li>
-                    <li>{t.freeFeature3}</li>
-                  </ul>
-                  <button className="secondary-button plan-button" onClick={() => setSelectedPlan("free")}>
-                    {selectedPlan === "free" ? t.selectedPlan : t.choosePlan}
-                  </button>
-                </article>
-                <article className={`plan-card premium-plan ${selectedPlan === "premium" ? "plan-selected" : ""}`}>
-                  <span className="plan-badge">MORE SUPPORT</span>
-                  <div className="plan-label">{t.premiumPlan}</div>
-                  <h2>{t.premiumPrice}</h2>
-                  <p>{t.premiumDescription}</p>
-                  <h3>{t.included}</h3>
-                  <ul>
-                    <li>{t.premiumFeature1}</li>
-                    <li>{t.premiumFeature2}</li>
-                    <li>{t.premiumFeature3}</li>
-                    <li>{t.premiumFeature4}</li>
-                  </ul>
-                  <button className="primary-button plan-button" onClick={() => setSelectedPlan("premium")}>
-                    {selectedPlan === "premium" ? t.selectedPlan : t.choosePlan}
-                  </button>
-                </article>
-              </div>
-              <p className="plan-disclaimer">{t.planNote}</p>
-            </section>
+              <section className="premium-page">
+                <div className="premium-intro">
+                  <span className="eyebrow">FUNDI AI MEMBERSHIP</span>
+                  <h1>Choose the support that works for you</h1>
+                  <p>Start free, or explore extra guidance with Fundi AI Premium.</p>
+                </div>
+
+                <div className="plan-grid">
+                  <article className={`plan-card ${selectedPlan === "free" ? "plan-selected" : ""}`}>
+                    <div className="plan-label">{t.freePlan}</div>
+                    <h2>{t.freePrice}</h2>
+                    <p>{t.freeDescription}</p>
+                    <h3>{t.included}</h3>
+                    <ul>
+                      <li>{t.freeFeature1}</li>
+                      <li>{t.freeFeature2}</li>
+                      <li>{t.freeFeature3}</li>
+                    </ul>
+                    <button className="secondary-button plan-button" onClick={() => setSelectedPlan("free")}>
+                      {selectedPlan === "free" ? t.selectedPlan : t.choosePlan}
+                    </button>
+                  </article>
+
+                  <article className={`plan-card premium-plan ${selectedPlan === "premium" ? "plan-selected" : ""}`}>
+                    <span className="plan-badge">MORE SUPPORT</span>
+                    <div className="plan-label">{t.premiumPlan}</div>
+                    <h2>{t.premiumPrice}</h2>
+                    <p>{t.premiumDescription}</p>
+                    <h3>{t.included}</h3>
+                    <ul>
+                      <li>{t.premiumFeature1}</li>
+                      <li>{t.premiumFeature2}</li>
+                      <li>{t.premiumFeature3}</li>
+                      <li>{t.premiumFeature4}</li>
+                    </ul>
+                    <button className="primary-button plan-button" onClick={() => setSelectedPlan("premium")}>
+                      {selectedPlan === "premium" ? t.selectedPlan : t.choosePlan}
+                    </button>
+                  </article>
+                </div>
+
+                <p className="plan-disclaimer">{t.planNote}</p>
+              </section>
           )}
         </main>
 
         <footer>
           <span>{t.built}</span>
-          <span>
-          © {new Date().getFullYear()} Fundi AI
-        </span>
+          <span>© {new Date().getFullYear()} Fundi AI</span>
         </footer>
+
+        <VoiceAssistant
+            language={language}
+            onNavigate={setPage}
+            onSelectDevice={setDevice}
+            onSetSymptoms={setSymptoms}
+            onStartDiagnosis={() => diagnose()}
+        />
       </div>
   );
 }
